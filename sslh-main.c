@@ -29,6 +29,7 @@
 
 #include "common.h"
 #include "probe.h"
+#include "sd-daemon.h"
 
 const char* USAGE_STRING =
 "sslh " VERSION "\n" \
@@ -466,7 +467,7 @@ int main(int argc, char *argv[])
 
    extern char *optarg;
    extern int optind;
-   int res, num_addr_listen;
+   int res, num_addr_listen, i;
    struct proto* protocols = NULL;
 
    int *listen_sockets;
@@ -488,7 +489,23 @@ int main(int argc, char *argv[])
    if (verbose)
        printsettings();
 
-   num_addr_listen = start_listen_sockets(&listen_sockets, addr_listen);
+   num_addr_listen = sd_listen_fds(0);
+   if (num_addr_listen <= 0)
+       num_addr_listen = start_listen_sockets(&listen_sockets, addr_listen);
+       if (num_addr_listen < 0) {
+           fprintf(stderr, "Failed to start_listen_sockets(): %m\n");
+           return EXIT_FAILURE;
+       }
+   else {
+       listen_sockets = calloc(num_addr_listen + 1, sizeof(int));
+       if (!listen_sockets) {
+           fprintf(stderr, "%s\n", strerror(ENOMEM));
+           return EXIT_FAILURE;
+       }
+
+       for (i = 0; i < num_addr_listen; i++)
+           listen_sockets[i] = SD_LISTEN_FDS_START + i;
+   }
 
    if (!foreground) {
        if (fork() > 0) exit(0); /* Detach */
@@ -511,7 +528,7 @@ int main(int argc, char *argv[])
    /* Open syslog connection */
    setup_syslog(argv[0]);
 
-   main_loop(listen_sockets, num_addr_listen);
+   main_loop(listen_sockets);
 
    return 0;
 }

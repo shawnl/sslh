@@ -71,7 +71,9 @@ int start_listen_sockets(int *sockfd[], struct addrinfo *addr_list)
    if (verbose)
        fprintf(stderr, "listening to %d addresses\n", num_addr);
 
-   *sockfd = malloc(num_addr * sizeof(*sockfd[0]));
+   *sockfd = calloc(num_addr + 1, sizeof(*sockfd[0]));
+   if (!*sockfd)
+       return -ENOMEM;
 
    for (i = 0, addr = addr_list; i < num_addr && addr; i++, addr = addr->ai_next) {
        if (!addr) {
@@ -84,7 +86,7 @@ int start_listen_sockets(int *sockfd[], struct addrinfo *addr_list)
        check_res_dumpdie((*sockfd)[i], addr, "socket");
 
        reuse = 1;
-       res = setsockopt((*sockfd)[i], SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
+       res = setsockopt((*sockfd)[i], SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
        check_res_dumpdie(res, addr, "setsockopt");
 
        res = bind((*sockfd)[i], addr->ai_addr, addr->ai_addrlen);

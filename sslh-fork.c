@@ -20,6 +20,10 @@
 
 */
 
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
+
+
 #include "common.h"
 #include "probe.h"
 
@@ -124,8 +128,9 @@ void start_shoveler(int in_socket)
    exit(0);
 }
 
-static int *listener_pid;
-static int listener_pid_number = 0;
+/* number of children */
+static int listener_pid_number = 5;
+static int listener_pid[5];
 
 void stop_listeners(int sig)
 {
@@ -136,45 +141,78 @@ void stop_listeners(int sig)
     }
 }
 
-void main_loop(int listen_sockets[], int num_addr_listen)
+               /* 0 terminated array */
+int main_loop(int listen_sockets[])
 {
-    int in_socket, i, res;
+    int in_socket, i, res, epollfd, r, sfd;
+    struct epoll_event ev, events[1];
     struct sigaction action;
+    sigset_t mask;
 
-    listener_pid_number = num_addr_listen;
-    listener_pid = malloc(listener_pid_number * sizeof(listener_pid[0]));
+    listener_pid[0] = 0;
 
-    /* Start one process for each listening address */
-    for (i = 0; i < num_addr_listen; i++) {
-        if (!(listener_pid[i] = fork())) {
+    epollfd = epoll_create1(EPOLL_CLOEXEC);
+    if (epollfd < 0) {
+        fprintf(stderr, "epoll_create1() failed: %m");
+        return -errno;
+    }
 
-            /* Listening process just accepts a connection, forks, and goes
-             * back to listening */
-            while (1)
-            {
-                in_socket = accept(listen_sockets[i], 0, 0);
-                if (verbose) fprintf(stderr, "accepted fd %d\n", in_socket);
-
-                if (!fork())
-                {
-                    close(listen_sockets[i]);
-                    start_shoveler(in_socket);
-                    exit(0);
-                }
-                close(in_socket);
-            }
+    ev.events = EPOLLIN|EPOLLET;
+    /* Add all the listening sockets to epoll */
+    for (i = 0; listen_sockets[i]; i++) {
+        ev.data.fd = listen_sockets[i];
+        r = epoll_ctl(epollfd, EPOLL_CTL_ADD, listen_sockets[i], &ev);
+        if (r < 0) {
+             fprintf(stderr, "epoll_ctl() failed: %m");
+             return -errno;
         }
     }
 
-    /* Set SIGTERM to "stop_listeners" which further kills all listener
-     * processes. Note this won't kill processes that listeners forked, which
-     * means active connections remain active. */
-    memset(&action, 0, sizeof(action));
-    action.sa_handler = stop_listeners;
-    res = sigaction(SIGTERM, &action, NULL);
-    CHECK_RES_DIE(res, "sigaction");
+    /* add signalfd for graceful exit */
+    sigemptyset(&mask);
+    signaddset(&mask, SIGTERM);
+    sfd = signalfd(-1, &mask, 0);
+    ev.events = EPOLLIN;
+    ev.data.fd = sfd;
+    r = epoll_ctl(epollfd, EPOLL_CTL_ADD, sfd, &ev);
+    if (r < 0) {
+         fprintf(stderr, "epoll_ctl() failed: %m");
+         return -errno;
+    }
 
-    wait(NULL);
+    /* fork() children */
+    for (i = 0; i < listener_pid_number; i++)
+        if ((listener_pid[i] = fork()) == 0)
+            break;
+
+    while (1) {
+        struct signalfd_siginfo s;
+
+        r = epoll_wait(epollfd, events, 1, -1);
+        if (r < 0) {
+            fprintf(stderr, "epoll_wait() failed: %m");
+            return -errno;
+        }
+
+        if (events[0].data.fd == sfd) {
+            r = read(sfd, &s, sizeof(s));
+            if (s.ssi_signo == SIGTERM) {
+                if (listener_pid[0] > 0) {
+                    /* parent */
+                    stop_listeners(SIGTERM);
+                } else
+                    _exit(EXIT_SUCCESS);
+            }
+            fprintf(stderr, "Shouldn't be here");
+            _exit(EXIT_FAILURE);
+        }
+
+        in_socket = accept(events[0].data.fd, 0, 0);
+        if (verbose) fprintf(stderr, "accepted fd %d from sockfd %d\n", in_socket, events[0].data.fd);
+
+        start_shoveler(in_socket);
+        close(in_socket);
+    }
 }
 
 /* The actual main is in common.c: it's the same for both version of

@@ -114,6 +114,6 @@ extern const char* server_type;
 /* sslh-fork.c */
 void start_shoveler(int);
 
-void main_loop(int *listen_sockets, int num_addr_listen);
+int main_loop(int listen_sockets[]);
 
 #endif
